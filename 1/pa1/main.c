@@ -95,8 +95,11 @@ int send_multicast(void *self, const Message *msg) {
         return -1;
     }
 
-    for (local_id i = 0; i < process->channels_size; i++) {
-        Channel *channel = &process->channels[i];
+    for (local_id dst = 0; dst < process->channels_size; dst++) {
+        if (process->id == dst) {
+            continue;
+        }
+        Channel *channel = &process->channels[dst];
         if (channel_write(channel, msg) != 0) {
             return -1;
         }
@@ -126,15 +129,11 @@ int receive_any(void *self, Message *msg) {
 }
 
 static void child_code_continue(Process *self) {
-    for (int i = 0; i < self->channels_size; i++) {
-        printf("Channel: %d<->%d, fds: %d:%d \n", self->id, i, self->channels[i].rfd, self->channels[i].wfd);
-    }
-
     // started
     char str_buffer[1024];
     size_t str_size = sprintf(str_buffer, log_started_fmt, self->id, getpid(), getppid());
-    printf(str_buffer);
-    fprintf(event_log_fd, str_buffer);
+    printf(log_started_fmt, self->id, getpid(), getppid());
+    fprintf(event_log_fd, log_started_fmt, self->id, getpid(), getppid());
     fflush(event_log_fd);
 
     Message start_message = (Message) {
@@ -153,7 +152,6 @@ static void child_code_continue(Process *self) {
         if (i == self->id) {
             continue;
         }
-        printf("Process: %d, waiting: %d \n", self->id, i);
         Message msg;
         if (receive(self, i, &msg) != 0 || msg.s_header.s_type != STARTED) {
             perror("receive");
@@ -168,8 +166,8 @@ static void child_code_continue(Process *self) {
 
     // finish
     str_size = sprintf(str_buffer, log_done_fmt, self->id);
-    printf(str_buffer);
-    fprintf(event_log_fd, str_buffer);
+    printf(log_done_fmt, self->id);
+    fprintf(event_log_fd, log_done_fmt, self->id);
     fflush(event_log_fd);
 
     Message finish_message = (Message) {
@@ -240,7 +238,7 @@ static pipe_desc *open_pipes(size_t n) {
     }
     for (int i = 0; i < n; i++) {
         for (int j = 0; j < n; j++) {
-            if (i == j || i == 0) {
+            if (i == j) {
                 matrix_set(matrix, n, i, j, (pipe_desc) {
                         .data[0] = -1,
                         .data[1] = -1
@@ -351,19 +349,11 @@ int main(int argc, char *argv[]) {
         exit(EXIT_FAILURE);
     }
 
-    printf("Matrix: \n");
-    for (int i = 0; i < n; i++) {
-        for (int j = 0; j < n; j++) {
-            pipe_desc fd = *matrix_get(matrix, n, i, j);
-            printf("%d:%d ", fd.data[0], fd.data[1]);
-        }
-        printf("\n");
-    }
-
     pid_t cpid;
     for (local_id i = 1; i < n; i++) {
         cpid = fork();
         if (cpid == -1) {
+            free(matrix);
             perror("fork");
             exit(EXIT_FAILURE);
         }

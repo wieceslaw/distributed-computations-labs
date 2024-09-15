@@ -1,13 +1,16 @@
 #include <stdio.h>
 #include "common.h"
 #include "ipc.h"
-#include "pa1.h"
+#include "pa2345.h"
 
 #include <sys/wait.h>
 #include <stdlib.h>
 #include <unistd.h>
 #include <string.h>
 #include <getopt.h>
+#include <fcntl.h>
+#include <errno.h>
+#include <stdbool.h>
 
 FILE *pipes_log_fd;
 FILE *event_log_fd;
@@ -28,22 +31,45 @@ typedef struct {
     int data[2];
 } pipe_desc;
 
-static int read_blocking(const int fd, char *buffer, const size_t size) {
-    if (size == 0) {
-        return 0;
-    }
-    size_t ptr = 0;
-    do {
-        ssize_t tmp = read(fd, buffer + ptr, size - ptr);
-        if (tmp <= 0) {
-            return -1;
+typedef enum {
+    READ_STATUS_OK = 0,
+    READ_STATUS_EMPTY,
+    READ_STATUS_CLOSED,
+    READ_STATUS_ERROR
+} ReadStatus;
+
+static ReadStatus read_non_blocking(const int fd, char* buffer, const size_t buffer_size) {
+    ssize_t bytes_read;
+    bytes_read = read(fd, buffer, buffer_size);
+    if (bytes_read == 0) {
+        return READ_STATUS_CLOSED;
+    } else if (bytes_read < 0) {
+        if (errno == EAGAIN) {
+            return READ_STATUS_EMPTY;
+        } else {
+            return READ_STATUS_ERROR;
         }
-        ptr += tmp;
-    } while (ptr != size);
-    return 0;
+    }
+    size_t ptr = bytes_read;
+    while (bytes_read < buffer_size) {
+        bytes_read = read(fd, buffer + ptr, buffer_size - ptr);
+        if (bytes_read <= 0) {
+            return READ_STATUS_ERROR;
+        }
+        ptr += bytes_read;
+    }
+    return READ_STATUS_OK;
 }
 
-static int channel_read(const Channel *const cnl, Message *msg) {
+static int read_blocking(const int fd, char *buffer, const size_t size) {
+    ReadStatus status;
+    do {
+        status = read_non_blocking(fd, buffer, size);
+    } while (status == READ_STATUS_EMPTY);
+    return status == READ_STATUS_OK;
+}
+
+static int channel_read_blocking(const Channel *const cnl, Message *msg) {
     if (read_blocking(cnl->rfd, (char *) &msg->s_header, sizeof(MessageHeader)) != 0) {
         return -1;
     }
@@ -51,6 +77,18 @@ static int channel_read(const Channel *const cnl, Message *msg) {
         return -1;
     }
     return 0;
+}
+
+static ReadStatus channel_read_non_blocking(const Channel *const cnl, Message *msg) {
+    ReadStatus status;
+    status = read_non_blocking(cnl->rfd, (char *) &msg->s_header, sizeof(MessageHeader));
+    if (status != READ_STATUS_OK) {
+        return status;
+    }
+    if (read_blocking(cnl->rfd, msg->s_payload, msg->s_header.s_payload_len) != 0) {
+        return READ_STATUS_ERROR;
+    }
+    return READ_STATUS_OK;
 }
 
 static int channel_write(const Channel *const cnl, const Message *const msg) {
@@ -65,6 +103,52 @@ static int channel_write(const Channel *const cnl, const Message *const msg) {
         ptr += written;
     } while (ptr != buffer_size);
     return 0;
+}
+
+int receive(void *self, local_id from, Message *msg) {
+    Process *process = (Process *) self;
+    if (from == process->id || from >= process->channels_size || from == PARENT_ID) {
+        return -1;
+    }
+    Channel *channel = &process->channels[from];
+
+    if (channel_read_blocking(channel, msg) != 0) {
+        return -1;
+    }
+
+    if (msg->s_header.s_magic != MESSAGE_MAGIC) {
+        return -1;
+    }
+    return 0;
+}
+
+int receive_any(void *self, Message *msg) {
+    Process *process = (Process *) self;
+    ReadStatus status;
+    bool empty_exists = false;
+    do {
+        empty_exists = false;
+        for (int i = 0; i < process->channels_size; i++) {
+            Channel* channel = &process->channels[i];
+            status = channel_read_non_blocking(channel, msg);
+            switch (status) {
+                case READ_STATUS_OK: {
+                    return 0;
+                }
+                case READ_STATUS_ERROR: {
+                    return -1;
+                }
+                case READ_STATUS_EMPTY: {
+                    empty_exists = true;
+                    break;
+                }
+                case READ_STATUS_CLOSED: {
+                    continue;
+                }
+            }
+        }
+    } while (empty_exists);
+    return -1;
 }
 
 int send(void *self, local_id dst, const Message *msg) {
@@ -103,27 +187,6 @@ int send_multicast(void *self, const Message *msg) {
             return -1;
         }
     }
-    return 0;
-}
-
-int receive(void *self, local_id from, Message *msg) {
-    Process *process = (Process *) self;
-    if (from == process->id || from >= process->channels_size || from == PARENT_ID) {
-        return -1;
-    }
-    Channel *channel = &process->channels[from];
-
-    if (channel_read(channel, msg) != 0) {
-        return -1;
-    }
-
-    if (msg->s_header.s_magic != MESSAGE_MAGIC) {
-        return -1;
-    }
-    return 0;
-}
-
-int receive_any(void *self, Message *msg) {
     return 0;
 }
 
@@ -288,6 +351,11 @@ static Channel *extract_channels(pipe_desc *pipes_matrix, size_t n, size_t x) {
             pipes_matrix[i].data[j] = -1;
         }
     }
+
+    for (size_t i = 0; i < n; i++) {
+        if (fcntl(channels[i].rfd, F_SETFL, O_NONBLOCK) < 0)
+            exit(2);
+    }
     return channels;
 }
 
@@ -306,7 +374,7 @@ static void free_channels(Channel *channels, local_id channels_size) {
     free(channels);
 }
 
-int main(int argc, char *argv[]) {
+int foo(int argc, char *argv[]) {
     char *process_str = NULL;
     const char *short_options = "p:";
     const struct option long_options[] = {
@@ -400,6 +468,7 @@ int main(int argc, char *argv[]) {
     while (wait(NULL) > 0);
     fclose(pipes_log_fd);
     fclose(event_log_fd);
+    return 0;
 }
 
 /*

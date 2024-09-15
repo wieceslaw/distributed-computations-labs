@@ -6,9 +6,8 @@ void transfer(void * parent_data, local_id src, local_id dst,
     // student, please implement me
 }
 
-int main(int argc, char * argv[])
+int foo(int argc, char * argv[])
 {
-    get_physical_time();
     //bank_robbery(parent_data);
     //print_history(all);
 

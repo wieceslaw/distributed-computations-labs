@@ -14,7 +14,7 @@
 
 FILE *pipes_log_fd;
 FILE *event_log_fd;
-local_id current_pid;
+local_id current_id;
 
 typedef struct {
     int rfd;
@@ -353,8 +353,12 @@ static Channel *extract_channels(pipe_desc *pipes_matrix, size_t n, size_t x) {
     }
 
     for (size_t i = 0; i < n; i++) {
-        if (fcntl(channels[i].rfd, F_SETFL, O_NONBLOCK) < 0)
-            exit(2);
+        int fd = channels[i].rfd;
+        if (fd > 0) {
+            if (fcntl(channels[i].rfd, F_SETFL, O_NONBLOCK) < 0) {
+                exit(EXIT_FAILURE);
+            }
+        }
     }
     return channels;
 }
@@ -363,18 +367,85 @@ static void free_channels(Channel *channels, local_id channels_size) {
     for (local_id i = 0; i < channels_size; i++) {
         Channel *channel = &channels[i];
         if (channel->rfd != -1) {
-            fprintf(pipes_log_fd, "Closed rfd [%d: %d]\n", current_pid, i);
+            fprintf(pipes_log_fd, "Closed rfd [%d: %d]\n", current_id, i);
             close(channel->rfd);
         }
         if (channel->wfd != -1) {
-            fprintf(pipes_log_fd, "Closed wfd [%d: %d]\n", current_pid, i);
+            fprintf(pipes_log_fd, "Closed wfd [%d: %d]\n", current_id, i);
             close(channel->wfd);
         }
     }
     free(channels);
 }
 
-int foo(int argc, char *argv[]) {
+static int run_child_process(local_id id, local_id n, pipe_desc *matrix) {
+    pid_t pid = fork();
+    if (pid == -1) {
+        free(matrix);
+        perror("fork");
+        return -1;
+    }
+    if (pid > 0) {
+        return 0;
+    }
+
+    // child code
+    current_id = id;
+    Channel *channels = extract_channels(matrix, n, id);
+    free(matrix);
+    if (channels == NULL) {
+        perror("malloc");
+        exit(EXIT_FAILURE);
+    }
+
+    Process cps = (Process) {
+            .channels = channels,
+            .channels_size = n,
+            .id = id
+    };
+
+    child_code_continue(&cps);
+
+    free_channels(channels, n);
+    fclose(pipes_log_fd);
+    fclose(event_log_fd);
+    exit(EXIT_SUCCESS);
+}
+
+static int run_processes(local_id n) {
+    pipe_desc *matrix = open_pipes(n);
+    if (matrix == NULL) {
+        perror("malloc");
+        return -1;
+    }
+
+    for (local_id i = 1; i < n; i++) {
+        if (run_child_process(i, n, matrix) != 0) {
+            return -1;
+        }
+    }
+
+    // parent code
+    Channel *channels = extract_channels(matrix, n, 0);
+    free(matrix);
+    if (channels == NULL) {
+        perror("malloc");
+        return -1;
+    }
+
+    parent_code_continue(&(Process) {
+            .id = 0,
+            .channels = channels,
+            .channels_size = n
+    });
+
+    free_channels(channels, n);
+
+    while (wait(NULL) > 0);
+    return 0;
+}
+
+int main(int argc, char *argv[]) {
     char *process_str = NULL;
     const char *short_options = "p:";
     const struct option long_options[] = {
@@ -399,81 +470,24 @@ int foo(int argc, char *argv[]) {
     pipes_log_fd = fopen(pipes_log, "a");
     if (pipes_log_fd == NULL) {
         perror("fopen");
-        exit(EXIT_FAILURE);
+        return EXIT_FAILURE;
     }
     event_log_fd = fopen(events_log, "a");
     if (event_log_fd == NULL) {
         perror("fopen");
-        exit(EXIT_FAILURE);
+        return EXIT_FAILURE;
     }
-    current_pid = PARENT_ID;
+    current_id = PARENT_ID;
 
-    local_id x = atoi(process_str); // number of child processes
-    local_id n = x + 1; // number of processes
-    pipe_desc *matrix = open_pipes(n);
-    if (matrix == NULL) {
-        perror("malloc");
-        exit(EXIT_FAILURE);
-    }
+    local_id child_processes_number = atoi(process_str); // number of child processes
 
-    pid_t cpid;
-    for (local_id i = 1; i < n; i++) {
-        cpid = fork();
-        if (cpid == -1) {
-            free(matrix);
-            perror("fork");
-            exit(EXIT_FAILURE);
-        }
-        if (cpid == 0) {
-            // child code
-            current_pid = i;
-            Channel *channels = extract_channels(matrix, n, i);
-            free(matrix);
-            if (channels == NULL) {
-                perror("malloc");
-                exit(EXIT_FAILURE);
-            }
-
-            Process cps = (Process) {
-                    .channels = channels,
-                    .channels_size = n,
-                    .id = i
-            };
-
-            child_code_continue(&cps);
-
-            free_channels(channels, n);
-            fclose(pipes_log_fd);
-            fclose(event_log_fd);
-            exit(EXIT_SUCCESS);
-        }
+    if (run_processes(child_processes_number + 1) != 0) {
+        fclose(pipes_log_fd);
+        fclose(event_log_fd);
+        return EXIT_FAILURE;
     }
 
-    // parent code
-    Channel *channels = extract_channels(matrix, n, 0);
-    free(matrix);
-    if (channels == NULL) {
-        perror("malloc");
-        exit(EXIT_FAILURE);
-    }
-
-    parent_code_continue(&(Process) {
-            .id = 0,
-            .channels = channels,
-            .channels_size = n
-    });
-
-    free_channels(channels, n);
-
-    while (wait(NULL) > 0);
     fclose(pipes_log_fd);
     fclose(event_log_fd);
     return 0;
 }
-
-/*
-   0  1  2
-0  F  F  F
-1  T  F  T
-2  T  T  F
-*/

@@ -11,7 +11,7 @@
 
 FILE *pipes_log_fd;
 FILE *event_log_fd;
-local_id current_pid;
+local_id current_id;
 
 typedef struct {
     int rfd;
@@ -295,11 +295,11 @@ static void free_channels(Channel *channels, local_id channels_size) {
     for (local_id i = 0; i < channels_size; i++) {
         Channel *channel = &channels[i];
         if (channel->rfd != -1) {
-            fprintf(pipes_log_fd, "Closed rfd [%d: %d]\n", current_pid, i);
+            fprintf(pipes_log_fd, "Closed rfd [%d: %d]\n", current_id, i);
             close(channel->rfd);
         }
         if (channel->wfd != -1) {
-            fprintf(pipes_log_fd, "Closed wfd [%d: %d]\n", current_pid, i);
+            fprintf(pipes_log_fd, "Closed wfd [%d: %d]\n", current_id, i);
             close(channel->wfd);
         }
     }
@@ -338,7 +338,7 @@ int main(int argc, char *argv[]) {
         perror("fopen");
         exit(EXIT_FAILURE);
     }
-    current_pid = PARENT_ID;
+    current_id = PARENT_ID;
 
     local_id x = atoi(process_str); // number of child processes
     local_id n = x + 1; // number of processes
@@ -358,7 +358,7 @@ int main(int argc, char *argv[]) {
         }
         if (cpid == 0) {
             // child code
-            current_pid = i;
+            current_id = i;
             Channel *channels = extract_channels(matrix, n, i);
             free(matrix);
             if (channels == NULL) {

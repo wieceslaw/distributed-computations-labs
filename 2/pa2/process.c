@@ -217,6 +217,16 @@ static pipe_desc *open_pipes(size_t n) {
             }
         }
     }
+    for (size_t i = 0; i < n * n; i++) {
+        pipe_desc fds = matrix[i];
+        for (size_t j = 0; j < 2; j++) {
+            if (fds.data[j] != -1) {
+                if (fcntl(fds.data[j], F_SETFL, O_NONBLOCK) < 0) {
+                    exit(EXIT_FAILURE);
+                }
+            }
+        }
+    }
     return matrix;
 }
 
@@ -251,15 +261,6 @@ static Channel *extract_channels(pipe_desc *pipes_matrix, size_t n, size_t x) {
                 close(fd);
             }
             pipes_matrix[i].data[j] = -1;
-        }
-    }
-
-    for (size_t i = 0; i < n; i++) {
-        int fd = channels[i].rfd;
-        if (fd > 0) {
-            if (fcntl(channels[i].rfd, F_SETFL, O_NONBLOCK) < 0) {
-                exit(EXIT_FAILURE);
-            }
         }
     }
     return channels;
@@ -309,8 +310,7 @@ static int run_child_process(
             .balance = init_balance,
             .history = (BalanceHistory) {
                     .s_id = id,
-                    .s_history_len = 0,
-                    .s_history = {0}
+                    .s_history_len = 0
             }
     };
     for (size_t i = 0; i < MAX_PROCESS_ID + 1; i++) {

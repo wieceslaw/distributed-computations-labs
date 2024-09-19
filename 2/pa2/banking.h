@@ -75,11 +75,11 @@ void transfer(void * parent_data, local_id src, local_id dst, balance_t amount);
 // provided to students for testing purposes
 //------------------------------------------------------------------------------
 
-/** Perform a number of transfers between various children with ids [1;max_id]
+/** Perform a number of transfers between various children with ids [1;channels_size]
  *
  * @param parent_data   Any data structure implemented by students to perform I/O,
  *                      will be passed to transfer()
- * @param max_id max    id of existing process, so that (max_id + 1) is the total
+ * @param max_id max    id of existing process, so that (channels_size + 1) is the total
  *                      number of processes
  */
 void bank_robbery(void * parent_data, local_id max_id);

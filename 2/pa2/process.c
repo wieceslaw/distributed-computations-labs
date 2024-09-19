@@ -13,7 +13,6 @@
 #include <stdbool.h>
 
 #include "ipc.h"
-#include "pa2345.h"
 #include "process.h"
 
 extern FILE *pipes_log_fd;
@@ -31,7 +30,10 @@ typedef enum {
     READ_STATUS_ERROR
 } ReadStatus;
 
-static ReadStatus read_non_blocking(const int fd, char* buffer, const size_t buffer_size) {
+static ReadStatus read_non_blocking(const int fd, char *buffer, const size_t buffer_size) {
+    if (buffer_size == 0) {
+        return READ_STATUS_OK;
+    }
     ssize_t bytes_read;
     bytes_read = read(fd, buffer, buffer_size);
     if (bytes_read == 0) {
@@ -59,14 +61,16 @@ static int read_blocking(const int fd, char *buffer, const size_t size) {
     do {
         status = read_non_blocking(fd, buffer, size);
     } while (status == READ_STATUS_EMPTY);
-    return status == READ_STATUS_OK;
+    return status;
 }
 
 static int channel_read_blocking(const Channel *const cnl, Message *msg) {
     if (read_blocking(cnl->rfd, (char *) &msg->s_header, sizeof(MessageHeader)) != 0) {
+        perror("Read blocking header");
         return -1;
     }
     if (read_blocking(cnl->rfd, msg->s_payload, msg->s_header.s_payload_len) != 0) {
+        perror("Read blocking body");
         return -1;
     }
     return 0;
@@ -91,6 +95,7 @@ static int channel_write(const Channel *const cnl, const Message *const msg) {
     do {
         ssize_t written = write(cnl->wfd, buffer + ptr, buffer_size - ptr);
         if (written == -1) {
+            perror("Write err");
             return -1;
         }
         ptr += written;
@@ -100,12 +105,13 @@ static int channel_write(const Channel *const cnl, const Message *const msg) {
 
 int receive(void *self, local_id from, Message *msg) {
     Process *process = (Process *) self;
-    if (from == process->id || from >= process->channels_size || from == PARENT_ID) {
+    if (from == process->id || from >= process->channels_size) {
         return -1;
     }
     Channel *channel = &process->channels[from];
 
     if (channel_read_blocking(channel, msg) != 0) {
+        fprintf(stderr, "Unable to read blocking from id: %d \n", from);
         return -1;
     }
 
@@ -122,7 +128,10 @@ int receive_any(void *self, Message *msg) {
     do {
         empty_exists = false;
         for (int i = 0; i < process->channels_size; i++) {
-            Channel* channel = &process->channels[i];
+            if (i == process->id) {
+                continue;
+            }
+            Channel *channel = &process->channels[i];
             status = channel_read_non_blocking(channel, msg);
             switch (status) {
                 case READ_STATUS_OK: {
@@ -153,9 +162,6 @@ int send(void *self, local_id dst, const Message *msg) {
     if (process->id == dst) {
         return -1;
     }
-    if (process->id == PARENT_ID) {
-        return -1;
-    }
     if (dst >= process->channels_size) {
         return -1;
     }
@@ -168,9 +174,6 @@ int send_multicast(void *self, const Message *msg) {
         return -1;
     }
     Process *process = (Process *) self;
-    if (process->id == PARENT_ID) {
-        return -1;
-    }
 
     for (local_id dst = 0; dst < process->channels_size; dst++) {
         if (process->id == dst) {
@@ -277,7 +280,9 @@ static void free_channels(Channel *channels, local_id channels_size) {
     free(channels);
 }
 
-static int run_child_process(local_id id, local_id n, pipe_desc *matrix, process_handler child_handler) {
+static int run_child_process(
+        local_id id, local_id n, pipe_desc *matrix, process_handler child_handler, balance_t init_balance
+) {
     pid_t pid = fork();
     if (pid == -1) {
         free(matrix);
@@ -300,8 +305,21 @@ static int run_child_process(local_id id, local_id n, pipe_desc *matrix, process
     Process cps = (Process) {
             .channels = channels,
             .channels_size = n,
-            .id = id
+            .id = id,
+            .balance = init_balance,
+            .history = (BalanceHistory) {
+                    .s_id = id,
+                    .s_history_len = 0,
+                    .s_history = {0}
+            }
     };
+    for (size_t i = 0; i < MAX_PROCESS_ID + 1; i++) {
+        cps.history.s_history[i].s_time = -1;
+    }
+    BalanceState *start_state = &cps.history.s_history[0];
+    start_state->s_time = 0;
+    start_state->s_balance = init_balance;
+    start_state->s_balance_pending_in = 0;
 
     child_handler(&cps);
 
@@ -311,7 +329,12 @@ static int run_child_process(local_id id, local_id n, pipe_desc *matrix, process
     exit(EXIT_SUCCESS);
 }
 
-int run_processes(local_id n, process_handler parent_handler, process_handler child_handler) {
+int run_processes(
+        local_id n,
+        process_handler parent_handler,
+        process_handler child_handler,
+        balance_t balances[MAX_PROCESS_ID + 1]
+) {
     pipe_desc *matrix = open_pipes(n);
     if (matrix == NULL) {
         perror("malloc");
@@ -319,7 +342,7 @@ int run_processes(local_id n, process_handler parent_handler, process_handler ch
     }
 
     for (local_id i = 1; i < n; i++) {
-        if (run_child_process(i, n, matrix, child_handler) != 0) {
+        if (run_child_process(i, n, matrix, child_handler, balances[i - 1]) != 0) {
             return -1;
         }
     }
@@ -335,7 +358,9 @@ int run_processes(local_id n, process_handler parent_handler, process_handler ch
     Process parent_process = (Process) {
             .id = 0,
             .channels = channels,
-            .channels_size = n
+            .channels_size = n,
+            .balance = 0,
+            .history = {0}
     };
 
     parent_handler(&parent_process);
